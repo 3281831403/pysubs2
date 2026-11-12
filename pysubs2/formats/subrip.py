@@ -13,6 +13,7 @@ from ..warnings import (
     TimestampOverflow,
     TimestampUnderflow,
 )
+from ._charrefs import decode_character_references
 from .base import FormatBase
 from .substation import parse_tags
 
@@ -136,6 +137,7 @@ class SubripFormat(FormatBase):
                 s = re.sub(r"< */ *b *>", r"{\\b0}", s)
             if not (keep_html_tags or keep_unknown_html_tags):
                 s = re.sub(r"< */? *[a-zA-Z][^>]*>", "", s) # strip other HTML tags
+            s = decode_character_references(s) # decode &amp; &#60; ...
             s = re.sub(r"\n", r"\\N", s) # convert newlines
             return s
 
@@ -189,6 +191,8 @@ class SubripFormat(FormatBase):
                             fragment = f"<s>{fragment}</s>"
                     body.append(fragment)
 
+            # SubRip has no escaping of its own; character references are
+            # decoded on read and the restored characters are written as-is.
             return re.sub("\n+", "\n", "".join(body).strip())
 
         for lineno, line in enumerate(cls._get_visible_lines(subs), 1):

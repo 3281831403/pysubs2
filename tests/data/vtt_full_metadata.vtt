@@ -1,0 +1,37 @@
+WEBVTT - fixed sample for round-trip tests
+
+NOTE
+This file is a fixed WebVTT sample used by the pysubs2 test suite.
+It exercises NOTE/STYLE/REGION blocks, cue identifiers, cue settings
+and HTML character references.
+
+REGION
+id:top
+width:40%
+lines:3
+regionanchor:0%,0%
+viewportanchor:10%,10%
+scroll:up
+
+STYLE
+::cue(b) {
+  color: lime;
+}
+
+intro
+00:00:01.000 --> 00:00:02.500 align:start position:10%
+Hello &amp; welcome world
+
+NOTE a note between two cues
+
+middle
+00:00:03.000 --> 00:00:04.000 line:80% align:middle
+Second &amp; cue with <i>italics</i>
+
+trailer
+00:00:05.000 --> 00:00:06.250 region:top
+Third &amp; cue in a region
+
+NOTE
+trailing note after the last cue
+

@@ -105,8 +105,20 @@ Example file::
 WebVTT
 ~~~~~~
 
-Time-based format similar to SubRip, format identifier is ``"vtt"``. Currently implemented
-as a flavour of SubRip, with no extra support for WebVTT-specific features like styles or subtitle alignment.
+Time-based format similar to SubRip, format identifier is ``"vtt"``. The file is parsed
+according to the WebVTT block structure: the file header, ``NOTE``/``STYLE``/``REGION``
+blocks, cue identifiers and cue settings (``align``, ``position``, ...) are recognized
+separately from cue payloads, so they never end up in subtitle text.
+
+On VTT -> VTT round-trips, the header, NOTE/STYLE/REGION blocks and per-cue identifiers
+and settings are preserved and written back verbatim. This WebVTT-specific metadata has
+no representation in the SubStation data model, so it is not exported to other formats
+(SRT, ASS/SSA, JSON, ...), which only see the cue texts. Cues without an explicit
+identifier are numbered sequentially.
+
+HTML character references (``&amp;``, ``&#60;``, ...) are decoded on read. On write,
+the cue text is escaped for WebVTT (``&``, ``<`` and ``>``), while recognized markup
+tags (``<i>``, ``</i>``, ...) and inline timestamp tags are kept as markup.
 `Link to WebVTT specification <https://developer.mozilla.org/en-US/docs/Web/API/WebVTT_API>`_, official name is
 "Web Video Text Tracks Format".
 Implemented in :class:`pysubs2.formats.webvtt.WebVTTFormat`.
@@ -121,6 +133,11 @@ Example file::
 
 .. versionchanged:: 1.0.0
    Added basic support for WebVTT subtitle format.
+
+.. versionchanged:: 1.10.0
+   Full block-based parsing: NOTE/STYLE/REGION blocks, cue identifiers and cue settings
+   are preserved on round-trips, and HTML character references are decoded on read and
+   escaped on write.
 
 TTML
 ~~~~

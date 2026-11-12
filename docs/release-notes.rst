@@ -1,6 +1,16 @@
 Release Notes
 =============
 
+**1.10.0** --- unreleased
+
+- WebVTT: the parser now follows the WebVTT block structure instead of reusing the SubRip
+  line parser. ``NOTE``/``STYLE``/``REGION`` blocks, cue identifiers and cue settings
+  (``align``, ``position``, ...) are no longer merged into cue text, and they are preserved
+  verbatim on VTT -> VTT round-trips. The metadata is not exported to SRT/ASS/JSON.
+- WebVTT/SubRip: HTML character references (``&amp;``, ``&#60;``, ...) are decoded on read;
+  WebVTT output escapes ``&``, ``<`` and ``>`` (markup tags are kept), while SubRip output
+  writes the restored characters as-is.
+
 **1.9.1** --- released on 2026-10-30
 
 - SRT parser is more conservative about removing subtitle indices (Issue #119)
