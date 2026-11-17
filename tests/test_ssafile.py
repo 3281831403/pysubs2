@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from pysubs2 import SSAEvent, SSAFile, SSAStyle, make_time
@@ -109,6 +111,86 @@ def test_transform_framerate() -> None:
     subs.transform_framerate(10, 20)
     assert subs[0] == SSAEvent(start=0, end=5)
     assert subs[1] == SSAEvent(start=500, end=505)
+
+
+def _karaoke_cs(text: str) -> list[int]:
+    """Extract karaoke durations (in centiseconds) from ASS override tags."""
+    return [int(m.group(1)) for m in re.finditer(r"\\(?:kf|ko|k|K)(\d+)", text)]
+
+
+def test_transform_framerate_scales_inline_times() -> None:
+    subs = SSAFile()
+    subs.append(SSAEvent(
+        start=0, end=1000,
+        text=r"{\K50\ko20\kf10\k30\kt40\fad(200,300)"
+             r"\fade(255,0,255,100,200,300,400)"
+             r"\move(0,0,10,10,0,500)\t(0,500,\fscx120)}"))
+    subs.transform_framerate(10, 20)  # ratio 0.5
+
+    text = subs[0].text
+    assert r"\K25" in text
+    assert r"\ko10" in text
+    assert r"\kf5" in text
+    assert r"\k15" in text
+    assert r"\kt20" in text
+    assert r"\fad(100,150)" in text
+    assert r"\fade(255,0,255,50,100,150,200)" in text
+    assert r"\move(0,0,10,10,0,250)" in text
+    assert r"\t(0,250,\fscx120)" in text
+
+
+def test_transform_framerate_karaoke_covers_line_after_roundtrip() -> None:
+    subs = SSAFile()
+    subs.append(SSAEvent(
+        start=0, end=3000,
+        text=r"{\kf100}{\kf33}SUN{\kf4}{\kf42}DAY{\kf4}{\kf38}MON{\kf4}{\kf29}DAY{\kf4}{\kf42}CHU"))
+    original = _karaoke_cs(subs[0].text)
+    assert sum(original) == 300
+
+    subs.transform_framerate(25, 23.976)
+
+    # Write to ASS and read back; timestamps are stored with centisecond
+    # precision, and the karaoke must still exactly cover the line.
+    subs2 = SSAFile.from_string(subs.to_string("ass"))
+    line2 = subs2[0]
+    assert sum(_karaoke_cs(line2.text)) == (line2.end - line2.start) // 10
+
+    # Each tag stays within a couple of centiseconds of its ideal value.
+    ratio = 25 / 23.976
+    for before, after in zip(original, _karaoke_cs(line2.text)):
+        assert abs(after - before * ratio) <= 2
+
+
+def test_transform_framerate_preserves_non_time_tags() -> None:
+    text = (r"{\an5\pos(655.758,142.500)\1c&H4E4AFB&\3c&H4E4AFB&"
+            r"\clip(m 0 0 l 100 0 100 100 0 100)\p4}m 0 0 l 100 0 100 100 0 100{\p0}")
+    subs = SSAFile()
+    subs.append(SSAEvent(start=0, end=1000, text=text))
+    subs.transform_framerate(10, 20)
+    assert subs[0].text == text
+
+
+def test_shift_preserves_inline_times() -> None:
+    text = r"{\k50\fad(200,300)\move(0,0,10,10,0,500)\t(0,500,\fscx120)}"
+    subs = SSAFile()
+    subs.append(SSAEvent(start=0, end=1000, text=text))
+    subs.shift(ms=100)
+    assert subs[0].start == 100
+    assert subs[0].end == 1100
+    assert subs[0].text == text
+
+
+def test_transform_framerate_keeps_positive_durations_nonzero() -> None:
+    subs = SSAFile()
+    subs.append(SSAEvent(
+        start=0, end=1000,
+        text=r"{\fad(1,300)\move(0,0,10,10,1,300)\t(1,300,\fscx120)\k1}"))
+    subs.transform_framerate(10, 20)  # ratio 0.5
+    text = subs[0].text
+    assert r"\fad(1,150)" in text
+    assert r"\move(0,0,10,10,1,150)" in text
+    assert r"\t(1,150,\fscx120)" in text
+    assert r"\k1" in text
 
 
 def test_insertion_of_wrong_type() -> None:

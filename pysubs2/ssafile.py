@@ -13,7 +13,7 @@ from .formats.microdvd import MicroDVDFormat
 from .formats.mpl2 import MPL2Format
 from .formats.sami import SAMIFormat
 from .formats.subrip import SubripFormat
-from .formats.substation import SubstationFormat
+from .formats.substation import SubstationFormat, transform_override_times
 from .formats.tmp import TmpFormat
 from .formats.ttml import TTMLFormat
 from .formats.webvtt import WebVTTFormat
@@ -962,6 +962,12 @@ class SSAFile(MutableSequence[SSAEvent]):
         Can be used to fix files converted from frame-based to time-based
         with wrongly assumed framerate.
 
+        Times embedded in SubStation override tags are rescaled as well.
+        This covers karaoke timing (``\\k``, ``\\K``, ``\\kf``, ``\\ko``,
+        ``\\kt``) and the time arguments of ``\\move``, ``\\t``, ``\\fad`` and
+        ``\\fade``. Other tag arguments (coordinates, colors, fonts, ``\\clip``,
+        drawing commands, ...) are left untouched.
+
         Arguments:
             in_fps (float)
             out_fps (float)
@@ -975,8 +981,13 @@ class SSAFile(MutableSequence[SSAEvent]):
 
         ratio = in_fps / out_fps
         for line in self:
-            line.start = int(round(line.start * ratio))
-            line.end = int(round(line.end * ratio))
+            old_start, old_end = line.start, line.end
+            new_start = int(round(old_start * ratio))
+            new_end = int(round(old_end * ratio))
+            line.text = transform_override_times(line.text, ratio,
+                                                 old_start, old_end, new_start, new_end)
+            line.start = new_start
+            line.end = new_end
 
     # ------------------------------------------------------------------------
     # Working with styles

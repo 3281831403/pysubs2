@@ -1,6 +1,7 @@
 # mypy: disable-error-code="override"
 
 import logging
+import math
 import re
 import warnings
 from typing import TYPE_CHECKING, Any, NotRequired, TextIO, TypedDict, Unpack, override
@@ -162,6 +163,262 @@ def parse_tags(text: str, style: SSAStyle = SSAStyle.DEFAULT_STYLE,
     if skip_empty_fragments:
         output = [(fragment, sty) for fragment, sty in output if fragment]
     return output
+
+
+#: Karaoke duration tags. The argument is a duration in centiseconds.
+KARAOKE_TAG = re.compile(r"\\(kf|ko|k|K)(\d+)")
+
+#: Karaoke offset tag. The argument is a time in centiseconds.
+KARAOKE_OFFSET_TAG = re.compile(r"\\kt(\d+)")
+
+#: Fade in/out tag. Both arguments are durations in milliseconds.
+FAD_TAG = re.compile(r"\\fad\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)")
+
+#: Complex fade tag. The first three arguments are alpha values, the last
+#: four are durations in milliseconds.
+FADE_TAG = re.compile(
+    r"\\fade\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*"
+    r"(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)"
+)
+
+#: Move tag. Coordinates must stay untouched; the optional trailing
+#: t1/t2 arguments are times in milliseconds.
+MOVE_TAG = re.compile(
+    r"\\move\(\s*([^,()]+?)\s*,\s*([^,()]+?)\s*,\s*([^,()]+?)\s*,\s*([^,()]+?)\s*"
+    r"(?:,\s*(-?\d+)\s*,\s*(-?\d+)\s*)?\)"
+)
+
+#: Leading t1/t2 times of a transform tag.
+T_TAG_TIMES = re.compile(r"^\s*(-?\d+)\s*,\s*(-?\d+)")
+
+
+def _round_half_away(x: float) -> int:
+    """Round to the nearest integer, rounding halves away from zero."""
+    if x >= 0:
+        return int(math.floor(x + 0.5))
+    return int(math.ceil(x - 0.5))
+
+
+def _scale_duration(value: int, ratio: float) -> int:
+    """Scale a duration, never crushing a positive value to zero."""
+    scaled = _round_half_away(value * ratio)
+    if value > 0 and scaled < 1:
+        return 1
+    return scaled
+
+
+def _timestamp_cs(ms: int) -> int:
+    """Convert a timestamp to the centiseconds in which ASS stores it."""
+    if ms < 0:
+        ms = 0
+    elif ms > MAX_REPRESENTABLE_TIME:
+        ms = MAX_REPRESENTABLE_TIME
+    return (ms + 5) // 10
+
+
+def _split_override_block(content: str) -> list[str]:
+    """
+    Split the inside of an override block into tags and literal fragments.
+
+    A tag is a backslash followed by its name and an optional parenthesized
+    argument list, which may contain nested parentheses and nested tags
+    (eg. ``\\t(0,500,\\fscx120)`` or ``\\clip(m 0 0 l 100 0)``). Everything
+    that does not start a tag is preserved as a literal fragment.
+    """
+    parts: list[str] = []
+    i, n = 0, len(content)
+    while i < n:
+        if content[i] != "\\":
+            j = content.find("\\", i)
+            if j < 0:
+                j = n
+            parts.append(content[i:j])
+            i = j
+            continue
+
+        start = i
+        i += 1
+        while i < n and content[i] not in "\\(":
+            i += 1
+        if i < n and content[i] == "(":
+            depth = 1
+            i += 1
+            while i < n:
+                if content[i] == "(":
+                    depth += 1
+                elif content[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        i += 1
+                        break
+                i += 1
+        parts.append(content[start:i])
+    return parts
+
+
+def _distribute(values: list[int], target: int) -> list[int]:
+    """
+    Distribute ``target`` proportionally to ``values``, using integers.
+
+    The total of the result is exactly ``target``. Individual values differ
+    from the ideal (non-integer) proportional value by less than one unit,
+    with the exception of positive values which are kept nonzero when there
+    is room for that without changing the total.
+    """
+    total = sum(values)
+    if total <= 0 or target <= 0:
+        return [0] * len(values)
+
+    scaled = [(value * target) // total for value in values]
+    remainder = target - sum(scaled)
+    if remainder:
+        order = sorted(
+            range(len(values)),
+            key=lambda i: (-((values[i] * target) % total), i),
+        )
+        for i in order[:remainder]:
+            scaled[i] += 1
+
+    # Do not crush a positive duration to zero if the total allows us to keep
+    # it, taking a unit from the largest value.
+    for i, value in enumerate(values):
+        if value > 0 and scaled[i] == 0:
+            donor = max(range(len(scaled)), key=lambda j: scaled[j])
+            if scaled[donor] > 1:
+                scaled[donor] -= 1
+                scaled[i] = 1
+
+    return scaled
+
+
+def _scale_karaoke(values: list[int], ratio: float,
+                   old_start: int, old_end: int,
+                   new_start: int, new_end: int) -> list[int]:
+    """
+    Rescale karaoke centisecond durations.
+
+    When the karaoke timings originally span the whole line, the rescaled
+    values sum exactly to the rescaled line duration, so that the karaoke
+    still covers the line after writing to ASS (where timestamps are rounded
+    to centiseconds). Otherwise their total is scaled by the framerate ratio.
+    """
+    total = sum(values)
+    if total <= 0:
+        return list(values)
+
+    old_duration = _timestamp_cs(old_end) - _timestamp_cs(old_start)
+    new_duration = _timestamp_cs(new_end) - _timestamp_cs(new_start)
+
+    if total == old_duration:
+        target = max(new_duration, 0)
+    else:
+        # Not tied to the line duration; scale proportionally, but keep a
+        # nonzero total nonzero.
+        target = max(_round_half_away(total * ratio), 1)
+    return _distribute(values, target)
+
+
+def _transform_t_tag(tag: str, ratio: float) -> str:
+    """Rescale the leading t1/t2 times of a ``\\t`` tag, leaving nested tags alone."""
+    inner = tag[3:-1]  # strip leading "\t(" and trailing ")"
+    m = T_TAG_TIMES.match(inner)
+    if m is None:
+        # No time arguments (eg. \t(\fscx120)); nothing to rescale.
+        return tag
+
+    t1, t2 = int(m.group(1)), int(m.group(2))
+    # Splicing by span keeps whitespace and the rest of the tag (accel,
+    # nested style modifiers) byte-identical.
+    return ("\\t(" + inner[:m.start(1)] + str(_scale_duration(t1, ratio))
+            + inner[m.end(1):m.start(2)] + str(_scale_duration(t2, ratio))
+            + inner[m.end(2):] + ")")
+
+
+def _transform_tag(tag: str, ratio: float, karaoke: list[int],
+                   karaoke_index: list[int]) -> str:
+    """Rescale time arguments of a single override tag."""
+    m = KARAOKE_TAG.fullmatch(tag)
+    if m:
+        i = karaoke_index[0]
+        karaoke_index[0] += 1
+        return "\\" + m.group(1) + str(karaoke[i])
+
+    m = KARAOKE_OFFSET_TAG.fullmatch(tag)
+    if m:
+        return "\\kt" + str(_scale_duration(int(m.group(1)), ratio))
+
+    m = FAD_TAG.fullmatch(tag)
+    if m:
+        t1 = _scale_duration(int(m.group(1)), ratio)
+        t2 = _scale_duration(int(m.group(2)), ratio)
+        return f"\\fad({t1},{t2})"
+
+    m = FADE_TAG.fullmatch(tag)
+    if m:
+        times = [_scale_duration(int(m.group(i)), ratio) for i in (4, 5, 6, 7)]
+        return "\\fade({},{},{},{},{},{},{})".format(
+            m.group(1), m.group(2), m.group(3), *times)
+
+    m = MOVE_TAG.fullmatch(tag)
+    if m:
+        if m.group(5) is None:
+            # No time arguments, only coordinates.
+            return tag
+        # Only the optional times are touched; coordinates stay byte-identical.
+        t1_start, t1_end = m.span(5)
+        t2_start, t2_end = m.span(6)
+        new_t1 = str(_scale_duration(int(m.group(5)), ratio))
+        new_t2 = str(_scale_duration(int(m.group(6)), ratio))
+        return tag[:t1_start] + new_t1 + tag[t1_end:t2_start] + new_t2 + tag[t2_end:]
+
+    if tag.startswith("\\t(") and tag.endswith(")"):
+        return _transform_t_tag(tag, ratio)
+
+    return tag
+
+
+def transform_override_times(text: str, ratio: float,
+                             old_start: int, old_end: int,
+                             new_start: int, new_end: int) -> str:
+    """
+    Rescale times embedded in SubStation override tags by given ratio.
+
+    This handles karaoke timing (``\\k``, ``\\K``, ``\\kf``, ``\\ko``, ``\\kt``)
+    and the time arguments of ``\\move``, ``\\t``, ``\\fad`` and ``\\fade``.
+    All other tag arguments (coordinates, colors, fonts, ``\\clip``, drawing
+    commands, ...) are left untouched.
+    """
+    if ratio == 1.0 or "{" not in text:
+        return text
+
+    blocks = list(SSAEvent.OVERRIDE_SEQUENCE.finditer(text))
+    if not blocks:
+        return text
+
+    karaoke: list[int] = []
+    for block in blocks:
+        for part in _split_override_block(block.group(0)[1:-1]):
+            m = KARAOKE_TAG.fullmatch(part)
+            if m:
+                karaoke.append(int(m.group(2)))
+
+    scaled_karaoke = _scale_karaoke(karaoke, ratio, old_start, old_end, new_start, new_end)
+    karaoke_index = [0]
+
+    parts: list[str] = []
+    pos = 0
+    for block in blocks:
+        if block.start() > pos:
+            parts.append(text[pos:block.start()])
+        new_tags = [
+            _transform_tag(part, ratio, scaled_karaoke, karaoke_index)
+            for part in _split_override_block(block.group(0)[1:-1])
+        ]
+        parts.append("{" + "".join(new_tags) + "}")
+        pos = block.end()
+    if pos < len(text):
+        parts.append(text[pos:])
+    return "".join(parts)
 
 
 NOTICE = "Script generated by pysubs2\nhttps://pypi.python.org/pypi/pysubs2"
